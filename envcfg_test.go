@@ -174,12 +174,12 @@ func TestBuggyParsers(t *testing.T) {
 		{
 			desc:   "parser that errors",
 			parser: func(s string) (foo, error) { return foo{}, errors.New("oops") },
-			err:    "1 error occurred:\n\n* envcfg: cannot populate B: oops",
+			err:    "1 error occurred:\n\t* envcfg: cannot populate B: oops\n\n",
 		},
 		{
 			desc:   "parser that panics",
 			parser: func(s string) (foo, error) { panic("I panicked"); return foo{}, nil },
-			err:    "1 error occurred:\n\n* envcfg: cannot populate B: github.com/btubbs/envcfg.TestBuggyParsers.func2 panicked: I panicked",
+			err:    "1 error occurred:\n\t* envcfg: cannot populate B: github.com/btubbs/envcfg.TestBuggyParsers.func2 panicked: I panicked\n\n",
 		},
 	}
 
@@ -307,7 +307,7 @@ func TestMissingValue(t *testing.T) {
 
 	var conf myConfig
 	err := LoadFromMap(map[string]string{}, &conf)
-	assert.Equal(t, "1 error occurred:\n\n* no FOO3 value found, and myConfig.F has no default", err.Error())
+	assert.Equal(t, "1 error occurred:\n\t* no FOO3 value found, and myConfig.F has no default\n\n", err.Error())
 }
 
 func TestBadStructs(t *testing.T) {
@@ -334,7 +334,7 @@ func TestBadStructs(t *testing.T) {
 		{
 			desc:  "no parser for this type",
 			strct: &quux{},
-			err:   "1 error occurred:\n\n* no parser function found for type envcfg.baz",
+			err:   "1 error occurred:\n\t* no parser function found for type envcfg.baz\n\n",
 		},
 	}
 
@@ -359,4 +359,39 @@ func TestEnvListToMap(t *testing.T) {
 		"QUUX": "",
 	}
 	assert.Equal(t, expected, envListToMap(ss))
+}
+
+func TestEnvLoadTagged(t *testing.T) {
+	type cfg struct {
+		Interface testConfigInterface `env:"INTERFACE" envtag:"interfaceTag"`
+	}
+
+	RegisterParserByTag(func(a string) (*testConfigInterfaceStruct, error) { return &testConfigInterfaceStruct{}, nil }, "interfaceTag")
+
+	var conf cfg
+	err := LoadFromMap(map[string]string{"INTERFACE": "Config String"}, &conf)
+	assert.Nil(t, err)
+	assert.Equal(t, "Hello Interface", conf.Interface.testInterfaceMethod("Hello Interface"))
+}
+
+func TestEnvLoadTaggedNotExist(t *testing.T) {
+	type cfg struct {
+		Interface testConfigInterface `env:"INTERFACE" envtag:"interfaceTagNotExist"`
+	}
+
+	RegisterParser(func(a string) (*testConfigInterfaceStruct, error) { return &testConfigInterfaceStruct{}, nil })
+
+	var conf cfg
+	err := LoadFromMap(map[string]string{"INTERFACE": "Config String"}, &conf)
+	assert.Equal(t, "1 error occurred:\n\t* no tagged parser function found for tag interfaceTagNotExist\n\n", err.Error())
+}
+
+type testConfigInterface interface {
+	testInterfaceMethod(string) string
+}
+
+type testConfigInterfaceStruct struct{}
+
+func (t testConfigInterfaceStruct) testInterfaceMethod(s string) string {
+	return s
 }

@@ -15,6 +15,7 @@ import (
 
 const (
 	cfgTag     = "env"
+	envTag     = "envtag"
 	defaultTag = "default"
 	tagSep     = ","
 	backSlash  = '\\'
@@ -38,6 +39,7 @@ func New() (*Loader, error) {
 func Empty() *Loader {
 	ec := &Loader{}
 	ec.parsers = map[reflect.Type]parser{}
+	ec.taggedParsers = map[string]parser{}
 	return ec
 }
 
@@ -55,6 +57,9 @@ type Loader struct {
 	// a map from reflect types to functions that can take a string and return a
 	// reflect value of that type.
 	parsers map[reflect.Type]parser
+	// a map from tags to functions that can take a string and return a
+	// reflect value of that type.
+	taggedParsers map[string]parser
 }
 
 // RegisterParser takes a func (string) (<anytype>, error) and registers it on the Loader as
@@ -125,6 +130,74 @@ func (e *Loader) RegisterParser(f interface{}) error {
 	return nil
 }
 
+// RegisterParserByTag takes a func (string) (<anytype>, error) and a tag string and registers it on the Loader as
+// the parser for <anytype>,string
+func (e *Loader) RegisterParserByTag(f interface{}, tag string) error {
+	// alright, let's inspect this f and make sure it's a func (string) (sometype, err)
+	t := reflect.TypeOf(f)
+	if t.Kind() != reflect.Func {
+		return fmt.Errorf("envcfg: %v is not a func", f)
+	}
+
+	fname := runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name()
+	// f should accept at least one argument
+	if t.NumIn() < 1 {
+		return fmt.Errorf(
+			"envcfg: parser should accept at least 1 string argument. %v accepts %d arguments",
+			fname, t.NumIn())
+	}
+
+	for n := 0; n < t.NumIn(); n++ {
+		// it should be a string argument
+		if t.In(n) != stringType {
+			return fmt.Errorf(
+				"envcfg: parser should accept only string arguments. %s accepts a %v argument",
+				fname, t.In(n))
+		}
+	}
+	// it should return two things
+	if t.NumOut() != 2 {
+		return fmt.Errorf(
+			"envcfg: parser should return 2 arguments. %v returns %d arguments",
+			fname, t.NumOut())
+	}
+	// the first can be any type. the second should be error
+	errorInterface := reflect.TypeOf((*error)(nil)).Elem()
+	if !t.Out(1).Implements(errorInterface) {
+		return fmt.Errorf(
+			"envcfg: parser's last return value should be error. %s's last return value is %v",
+			fname, t.Out(1))
+	}
+	_, alreadyRegistered := e.taggedParsers[tag]
+	if alreadyRegistered {
+		return fmt.Errorf("envcfg: a parser has already been registered for the tag %s. cannot also register %s",
+			tag, fname,
+		)
+	}
+
+	callable := reflect.ValueOf(f)
+	wrapped := func(ss ...string) (v reflect.Value, err error) {
+		defer func() {
+			p := recover()
+			if p != nil {
+				// we panicked running the inner parser function.
+				err = fmt.Errorf("%s panicked: %s", fname, p)
+			}
+		}()
+		vals := []reflect.Value{}
+		for _, s := range ss {
+			vals = append(vals, reflect.ValueOf(s))
+		}
+		returnvals := callable.Call(vals)
+		if !returnvals[1].IsNil() {
+			return reflect.Value{}, fmt.Errorf("%v", returnvals[1])
+		}
+		return returnvals[0], nil
+	}
+	e.taggedParsers[tag] = parser{f: wrapped, numArgs: t.NumIn()}
+	return nil
+}
+
 // LoadFromMap loads config from the provided map into the provided struct.
 func (e *Loader) LoadFromMap(vals map[string]string, c interface{}) error {
 	// assert that c is a struct.
@@ -144,7 +217,7 @@ func (e *Loader) LoadFromMap(vals map[string]string, c interface{}) error {
 	var errs *multierror.Error
 	for i := 0; i < structType.NumField(); i++ {
 		field := structType.Field(i)
-
+		envTagVal, envTagOk := field.Tag.Lookup(envTag)
 		tagVal, ok := field.Tag.Lookup(cfgTag)
 		if !ok {
 			// this field doesn't have our tag.  Skip.
@@ -169,13 +242,29 @@ func (e *Loader) LoadFromMap(vals map[string]string, c interface{}) error {
 			}
 		}
 
-		parser, ok := e.parsers[field.Type]
-		if !ok {
-			errs = multierror.Append(
-				errs,
-				fmt.Errorf("no parser function found for type %v", field.Type),
-			)
-			continue
+		var parser parser
+
+		if envTagOk {
+			var ok bool
+			parser, ok = e.taggedParsers[envTagVal]
+			if !ok {
+				errs = multierror.Append(
+					errs,
+					fmt.Errorf("no tagged parser function found for tag %s", envTagVal),
+				)
+				continue
+			}
+
+		} else {
+			var ok bool
+			parser, ok = e.parsers[field.Type]
+			if !ok {
+				errs = multierror.Append(
+					errs,
+					fmt.Errorf("no parser function found for type %v", field.Type),
+				)
+				continue
+			}
 		}
 
 		if parser.numArgs != len(envKeys) {

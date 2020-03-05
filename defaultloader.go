@@ -32,3 +32,9 @@ func LoadFromMap(vals map[string]string, c interface{}) error {
 func RegisterParser(f interface{}) error {
 	return defaultLoader.RegisterParser(f)
 }
+
+// RegisterParserByTag takes a func (string) (<anytype>, error), string and registers it on the default loader
+// as the parser for an envtag.
+func RegisterParserByTag(f interface{}, s string) error {
+	return defaultLoader.RegisterParserByTag(f, s)
+}
